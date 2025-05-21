@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+
+# === DECLARE ASSOCIATIVE ARRAYS ===
+declare -A INGREDIENTS            # INGREDIENTS[name] = 1
+declare -A INGREDIENT_MASS        # Used mass in grams
+declare -A INGREDIENT_TOTAL       # Label mass (e.g., 100g)
+declare -A INGREDIENT_SERVING     # Label serving size (e.g., 40g)
+declare -A INGREDIENT_DISPLAY_NAME # Display name mapping
+declare -A INGREDIENT_NUTRIENTS   # "ingredient|nutrient" = value
+declare -A PRODUCT_NUTRIENTS      # nutrient = value
+declare -A NUTRIENTS_SET          # Set of encountered nutrient names
+
+# === PRODUCT METADATA ===
+PRODUCT_NAME=""
+PRODUCT_TOTAL_MASS=0
+PRODUCT_SERVING_SIZE=0
+PRODUCT_NUM_SERVINGS=0
+OUTPUT_FILE=""
+OUTPUT_TO_FILE=0
+
+# === FUNCTIONS ===
+
+create_product() {
+    PRODUCT_NAME="$1"
+}
+
+# Accept display name optionally
+create_ingredient() {
+    local name=$1
+    local label_mass=$2
+    local serving_size=$3
+    local display_name=${4:-$(echo "$name" | sed 's/_/ /g' | awk '{for (i=1; i<=NF; i++) $i=toupper(substr($i,1,1)) substr($i,2)} 1')}
+
+    INGREDIENTS["$name"]=1
+    INGREDIENT_TOTAL["$name"]=$label_mass
+    INGREDIENT_SERVING["$name"]=$serving_size
+    INGREDIENT_DISPLAY_NAME["$name"]=$display_name
+}
+
+set_ingredient_nutrient() {
+    local name=$1
+    local nutrient=$2
+    local value=$3
+    INGREDIENT_NUTRIENTS["$name|$nutrient"]=$value
+    NUTRIENTS_SET["$nutrient"]=1
+}
+
+add_ingredient_to_product() {
+    local name=$1
+    local used_mass=$2
+
+    INGREDIENT_MASS["$name"]=$used_mass
+    ((PRODUCT_TOTAL_MASS+=used_mass))
+
+    for nutrient in "${!NUTRIENTS_SET[@]}"; do
+        value=${INGREDIENT_NUTRIENTS["$name|$nutrient"]}
+        label_mass=${INGREDIENT_TOTAL["$name"]}
+        if [[ -n "$value" && "$label_mass" -gt 0 ]]; then
+            scaled=$(awk -v v="$value" -v u="$used_mass" -v l="$label_mass" 'BEGIN { printf "%.4f\n", (v * u) / l }')
+            current="${PRODUCT_NUTRIENTS[$nutrient]:-0}"
+            PRODUCT_NUTRIENTS["$nutrient"]=$(awk -v c="$current" -v s="$scaled" 'BEGIN { printf "%.4f\n", c + s }')
+        fi
+    done
+}
+
+set_serving_size() {
+    PRODUCT_SERVING_SIZE=$1
+    PRODUCT_NUM_SERVINGS=$(awk -v total="$PRODUCT_TOTAL_MASS" -v size="$PRODUCT_SERVING_SIZE" 'BEGIN { printf "%.0f\n", total / size }')
+}
+
+output() {
+    local message=$1
+    if ((OUTPUT_TO_FILE)); then
+        printf "%s\n" "$message" >> "$OUTPUT_FILE"
+    else
+        echo -e "$message"
+    fi
+}
+
+set_output_file() {
+    OUTPUT_FILE=$1
+    OUTPUT_TO_FILE=1
+    echo "" > "$OUTPUT_FILE" # clear file
+}
+
+print_summary() {
+    output "=== Product Summary ==="
+    output "Name : $PRODUCT_NAME"
+    output "Total Mass : ${PRODUCT_TOTAL_MASS}g"
+    if ((PRODUCT_SERVING_SIZE > 0)); then
+        output "Serving Size : ${PRODUCT_SERVING_SIZE}g"
+        output "Servings Per Package : $PRODUCT_NUM_SERVINGS"
+    fi
+    output ""
+}
+
+print_ingredient_list() {
+    output "=== Ingredient List ==="
+    for name in "${!INGREDIENTS[@]}"; do
+        display_name=${INGREDIENT_DISPLAY_NAME["$name"]}
+        used_mass=${INGREDIENT_MASS["$name"]:-0}
+        output "- $display_name : ${used_mass}g"
+    done
+    output ""
+}
+
+print_nutritional_table() {
+    output "=== Nutritional Info per Total Product (${PRODUCT_TOTAL_MASS}g) ==="
+    for nutrient in "${!PRODUCT_NUTRIENTS[@]}"; do
+        output "$(printf '%-15s : %s' "$nutrient" "${PRODUCT_NUTRIENTS[$nutrient]}")"
+    done
+    if ((PRODUCT_SERVING_SIZE > 0)); then
+        output ""
+        output "=== Per Serving (${PRODUCT_SERVING_SIZE}g) ==="
+        for nutrient in "${!PRODUCT_NUTRIENTS[@]}"; do
+            per_serving=$(awk -v total="${PRODUCT_NUTRIENTS[$nutrient]}" -v servings="$PRODUCT_NUM_SERVINGS" 'BEGIN { printf "%.2f\n", total / servings }')
+            output "$(printf '%-15s : %s' "$nutrient" "$per_serving")"
+        done
+    fi
+    output ""
+}
+
+print_ingredient_nutrition() {
+    local name=$1
+    local display_name=${INGREDIENT_DISPLAY_NAME["$name"]}
+    local used_mass=${INGREDIENT_MASS["$name"]}
+    local label_mass=${INGREDIENT_TOTAL["$name"]}
+    local label_serving=${INGREDIENT_SERVING["$name"]}
+
+    output "=== Nutritional Info for Ingredient: $display_name ==="
+    output "Used Mass in Recipe : ${used_mass}g"
+    output "Label Serving Size : ${label_serving}g"
+    output ""
+
+    for nutrient in "${!NUTRIENTS_SET[@]}"; do
+        value=${INGREDIENT_NUTRIENTS["$name|$nutrient"]}
+        if [[ -n "$value" && "$label_mass" -gt 0 ]]; then
+            scaled_used=$(awk -v v="$value" -v u="$used_mass" -v l="$label_mass" 'BEGIN { printf "%.2f\n", (v * u) / l }')
+            scaled_label=$(awk -v v="$value" -v s="$label_serving" -v l="$label_mass" 'BEGIN { printf "%.2f\n", (v * s) / l }')
+            output "$(printf '%-15s : %s (per used mass), %s (per label serving)' "$nutrient" "$scaled_used" "$scaled_label")"
+        fi
+    done
+    output ""
+}
+# === HELP AND MANUAL ===
+print_help() {
+    cat <<EOF
+Usage: $(basename "$0") <command> [options]
+
+Available Commands:
+  help                      Show this help message and available commands.
+  manual                    Show the full manual.
+  example                   Run an example use case.
+  print_summary             Print the product summary.
+  print_ingredient_list     Print the ingredient list.
+  print_nutritional_table   Print the nutritional info table.
+  print_ingredient_nutrition <ingredient_name>
+                            Print detailed nutrition for a specific ingredient.
+
+Examples:
+  $(basename "$0") help
+  $(basename "$0") manual
+  $(basename "$0") print_summary
+  $(basename "$0") print_ingredient_nutrition rolled_oats
+EOF
+}
+
+print_manual() {
+    cat <<EOF
+Nutritional Calculator Manual
+=============================
+
+This CLI tool calculates total and per-serving nutritional content for a custom product built from labeled ingredients.
+
+Core Concepts:
+--------------
+- Ingredients must be declared with label data (total mass, serving size).
+- Nutrients per 100g or label mass can be provided.
+- Ingredient usage mass must be added to a product.
+- A serving size can be defined for the product.
+- Output can be redirected to a file if needed.
+
+Command Overview:
+-----------------
+- create_product <name>: Sets the product name.
+- create_ingredient <name> <label_mass> <serving_size> [display_name]
+- set_ingredient_nutrient <ingredient> <nutrient> <value>
+- add_ingredient_to_product <name> <used_mass>
+- set_serving_size <grams>
+- set_output_file <file_path>
+- print_summary
+- print_ingredient_list
+- print_nutritional_table
+- print_ingredient_nutrition <ingredient>
+
+Example CLI Use:
+----------------
+$(basename "$0") example
+
+EOF
+}
+
+run_example() {
+    set_output_file "picky_kids_coockies.txt"
+    create_product "Picky Kids Coockie"
+
+    create_ingredient "banana" 118 118 "Banana"
+    set_ingredient_nutrient "banana" "Calories" 105
+    # Macronutrients
+    set_ingredient_nutrient "banana" "Total Fat" 0
+    set_ingredient_nutrient "banana" "Saturated Fat" 0
+    set_ingredient_nutrient "banana" "Trans Fat" 0
+    set_ingredient_nutrient "banana" "Cholesterol" 0
+    set_ingredient_nutrient "banana" "Carbohydrates" 27
+    set_ingredient_nutrient "banana" "Dietraty Fiber" 3
+    set_ingredient_nutrient "banana" "Total Sugars"
+    set_ingredient_nutrient "banana" "Added Sugars" 0
+    set_ingredient_nutrient "banana" "Protein" 1
+    # Micronutrients
+    # Mineral
+    set_ingredient_nutrient "banana" "Calcium" 0.006
+    set_ingredient_nutrient "banana" "Potassium" 0.011
+    set_ingredient_nutrient "banana" "Sodium" 0.001
+    set_ingredient_nutrient "banana" "Iron" 0.001
+    # Vitamins
+    set_ingredient_nutrient "banana" "Vitamin A" 0
+    set_ingredient_nutrient "banana" "Vitamin C" 0
+    set_ingredient_nutrient "banana" "Vitamin D" 0
+
+    add_ingredient_to_product "banana" 300
+    
+    # create_ingredient "rolled_oats" 100 40 "Rolled Oats"
+    # set_ingredient_nutrient "rolled_oats" "calories" 379
+    # set_ingredient_nutrient "rolled_oats" "protein" 13
+    # set_ingredient_nutrient "rolled_oats" "fiber" 10
+    # set_ingredient_nutrient "rolled_oats" "potassium" 429
+
+    # create_ingredient "honey" 100 21 "Raw Honey"
+    # set_ingredient_nutrient "honey" "calories" 304
+    # set_ingredient_nutrient "honey" "sugar" 82
+    # set_ingredient_nutrient "honey" "sodium" 4
+
+    # add_ingredient_to_product "rolled_oats" 60
+    # add_ingredient_to_product "honey" 40
+
+    set_serving_size 25
+
+    print_summary
+    print_ingredient_list
+    print_nutritional_table
+    print_ingredient_nutrition "banana"
+    # print_ingredient_nutrition "honey"
+}
+
+# === CLI ENTRYPOINT ===
+main() {
+    case "$1" in
+        help)
+            print_help
+            ;;
+        manual)
+            print_manual
+            ;;
+        example)
+            run_example
+            ;;
+        create_product)
+            shift
+            create_product "$@"
+            ;;
+        create_ingredient)
+            shift
+            create_ingredient "$@"
+            ;;
+        set_ingredient_nutrient)
+            shift
+            set_ingredient_nutrient "$@"
+            ;;
+        add_ingredient_to_product)
+            shift
+            add_ingredient_to_product "$@"
+            ;;
+        set_serving_size)
+            shift
+            set_serving_size "$@"
+            ;;
+        set_output_file)
+            shift
+            set_output_file "$@"
+            ;;
+        print_summary)
+            print_summary
+            ;;
+        print_ingredient_list)
+            print_ingredient_list
+            ;;
+        print_nutritional_table)
+            print_nutritional_table
+            ;;
+        print_ingredient_nutrition)
+            shift
+            print_ingredient_nutrition "$@"
+            ;;
+        *)
+            echo "Unknown command: $1"
+            echo "Run \`$(basename "$0") help\` for usage."
+            exit 1
+            ;;
+    esac
+}
+
+# Run only if script is executed, not sourced
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
